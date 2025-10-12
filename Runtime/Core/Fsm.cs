@@ -27,8 +27,8 @@ namespace Refactor.Fsm
         public void Register<TState>(TEnum stateEnum)
             where TState : struct, IState<TContext>
         {
-            _stateMap = DictionaryPool<TEnum, StateCallbackTable<TContext>>.Default.Rent();
-            _stateMap[stateEnum] = StateStorage<TState, TContext>.Callbacks;
+            _stateMap            ??= DictionaryPool<TEnum, StateCallbackTable<TContext>>.Default.Rent();
+            _stateMap[stateEnum] =   StateStorage<TState, TContext>.Callbacks;
         }
 
         public void Start(TEnum initialState, ref TContext context)
