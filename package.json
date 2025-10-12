@@ -1,0 +1,20 @@
+{
+  "name": "cn.refactor.fsm",
+  "displayName": "Refactor Fsm",
+  "version": "0.9.0",
+  "description": "高性能 0 Gc 有限状态机.",
+  "unity": "2021.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git", 
+    "url": "https://github.com/refactor-op/cn.refactor.fsm.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
+  "files": [
+    "package.json",
+    "Runtime/",
+    "README.md"
+  ]
+}
