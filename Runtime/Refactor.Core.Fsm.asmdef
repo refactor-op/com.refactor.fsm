@@ -1,5 +1,5 @@
 {
-    "name": "Refactor.Fsm",
+    "name": "Refactor.Core.Fsm",
     "rootNamespace": "",
     "references": [
         "GUID:e1095b58868da7049b56c141f539621e",

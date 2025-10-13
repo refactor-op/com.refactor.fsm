@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
-using Refactor.Pool.Extra;
+using Refactor.Core.Pool.Extra;
 
-namespace Refactor.Fsm
+namespace Refactor.Core.Fsm
 {
     /// <summary>
     /// 有限状态机.
