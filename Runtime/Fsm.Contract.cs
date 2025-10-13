@@ -1,4 +1,4 @@
-namespace Refactor.Fsm
+namespace Refactor.Core.Fsm
 {
     /// <summary>
     /// 状态接口.

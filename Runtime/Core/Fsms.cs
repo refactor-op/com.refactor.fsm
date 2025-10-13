@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace Refactor.Fsm
+namespace Refactor.Core.Fsm
 {
     public static class Fsms
     {
