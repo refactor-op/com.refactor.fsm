@@ -1,0 +1,20 @@
+{
+    "name": "Refactor.Fsm.Tests",
+    "rootNamespace": "Refactor.Fsm.Tests",
+    "references": [
+        "GUID:4a7d68ec93b5641429dd5a53f401426e"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
