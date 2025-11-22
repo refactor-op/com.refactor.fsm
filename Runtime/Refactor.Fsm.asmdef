@@ -1,10 +1,8 @@
 {
-    "name": "Refactor.Core.Fsm",
-    "rootNamespace": "",
+    "name": "Refactor.Fsm",
+    "rootNamespace": "Refactor.Fsm",
     "references": [
-        "GUID:e1095b58868da7049b56c141f539621e",
-        "GUID:60ea655dcf14988428c627460bfeac68",
-        "GUID:7136bf365d79eff4fb8159f1aa51e221"
+        "GUID:e1095b58868da7049b56c141f539621e"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
