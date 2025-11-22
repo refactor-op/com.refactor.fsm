@@ -1,81 +1,120 @@
+﻿#nullable enable
 using System;
 using System.Collections.Generic;
-using Refactor.Core.Pool.Extra;
+using System.Runtime.CompilerServices;
+using Unity.Collections.LowLevel.Unsafe;
 
-namespace Refactor.Core.Fsm
+namespace Refactor.Fsm
 {
-    /// <summary>
-    /// 有限状态机.
-    /// </summary>
-    public struct Fsm<TEnum, TContext> : IDisposable
-        where TEnum : unmanaged, Enum
+    public sealed class Fsm<TState, TContext> : IDisposable
+        where TState : struct, Enum
     {
-        private TEnum _current;
-        private TEnum _previous;
-        private StateCallbackTable<TContext> _currentCallbacks;
-        private Dictionary<TEnum, StateCallbackTable<TContext>> _stateMap;
+        private readonly IStateHandler<TState>[] _states;
+        private TState _currentState;
+        private IStateHandler<TState> _currentHandler;
+        private TContext _context;
+        private bool _isPaused;
+        private IStackPolicy<TState>? _stackPolicy;
 
-        public readonly TEnum Current => _current;
-        public readonly TEnum Previous => _previous;
+        public TState CurrentState => _currentState;
+        public ref TContext Context => ref _context;
+        public bool IsPaused => _isPaused;
 
-        public readonly bool IsIn(TEnum state) =>
-            EqualityComparer<TEnum>.Default.Equals(_current, state);
-
-        public readonly bool WasIn(TEnum state) =>
-            EqualityComparer<TEnum>.Default.Equals(_previous, state);
-
-        public void Register<TState>(TEnum stateEnum)
-            where TState : struct, IState<TContext>
+        internal Fsm(
+            IStateHandler<TState>[] states,
+            TState initialState,
+            TContext context,
+            IStackPolicy<TState>? stackPolicy)
         {
-            _stateMap            ??= DictionaryPool<TEnum, StateCallbackTable<TContext>>.Default.Rent();
-            _stateMap[stateEnum] =   StateStorage<TState, TContext>.Callbacks;
+            _states = states;
+            _currentState = initialState;
+            _context = context;
+            _stackPolicy = stackPolicy;
+
+            var index = GetStateIndex(initialState);
+            _currentHandler = _states[index];
+            _currentHandler.OnEnter(initialState, initialState);
         }
 
-        public void Start(TEnum initialState, ref TContext context)
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void GoTo(TState newState)
         {
-            _current = initialState;
-            _previous = default;
-
-            if (_stateMap != null && _stateMap.TryGetValue(initialState, out var callbacks))
-            {
-                _currentCallbacks = callbacks;
-                _currentCallbacks.OnEnter.Invoke(ref context);
-            }
-        }
-
-        public void TransitionTo(TEnum nextState, ref TContext context)
-        {
-            if (EqualityComparer<TEnum>.Default.Equals(_current, nextState))
+            if (EqualityComparer<TState>.Default.Equals(_currentState, newState))
                 return;
 
-            _currentCallbacks.OnExit.Invoke(ref context);
-            _previous = _current;
-            _current = nextState;
+            var newIndex = GetStateIndex(newState);
+            var newHandler = _states[newIndex];
+            var oldState = _currentState;
 
-            if (_stateMap != null && _stateMap.TryGetValue(nextState, out var callbacks))
-                _currentCallbacks = callbacks;
-
-            _currentCallbacks.OnEnter.Invoke(ref context);
+            _currentHandler.OnExit(oldState, newState);
+            _currentState = newState;
+            _currentHandler = newHandler;
+            newHandler.OnEnter(newState, oldState);
         }
 
-        public void Update(ref TContext context) => _currentCallbacks.OnUpdate.Invoke(ref context);
-        public void FixedUpdate(ref TContext context) => _currentCallbacks.OnFixedUpdate.Invoke(ref context);
-        public void LateUpdate(ref TContext context) => _currentCallbacks.OnLateUpdate.Invoke(ref context);
-
-        /// <summary>
-        /// 释放资源（归还 Dictionary 到池）
-        /// </summary>
-        public void Dispose()
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Push(TState newState)
         {
-            if (_stateMap != null)
-            {
-                DictionaryPool<TEnum, StateCallbackTable<TContext>>.Default.Return(_stateMap);
-                _stateMap = null;
-            }
-            
-            _current = default;
-            _previous = default;
-            _currentCallbacks = default;
+            if (_stackPolicy == null)
+                throw new InvalidOperationException("Stack not enabled. Use .WithStack() to enable.");
+
+            if (_currentHandler is ISuspendableHandler<TState> suspendable)
+                suspendable.OnSuspend(_currentState);
+            else
+                _currentHandler.OnExit(_currentState, newState);
+
+            _stackPolicy.Push(_currentState, _currentHandler);
+
+            var newIndex = GetStateIndex(newState);
+            var newHandler = _states[newIndex];
+            var oldState = _currentState;
+
+            _currentState = newState;
+            _currentHandler = newHandler;
+            newHandler.OnEnter(newState, oldState);
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Pop()
+        {
+            if (_stackPolicy == null || !_stackPolicy.TryPop(out var previousState, out var previousHandler))
+                return;
+
+            var currentState = _currentState;
+            _currentHandler.OnExit(currentState, previousState);
+            _currentState = previousState;
+            _currentHandler = previousHandler;
+
+            if (previousHandler is ISuspendableHandler<TState> suspendable)
+                suspendable.OnResume(previousState);
+            else
+                previousHandler.OnEnter(previousState, currentState);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Update(float deltaTime, float scaledTime, float unscaledTime)
+        {
+            if (_isPaused) return;
+
+            if (_currentHandler is IUpdatableHandler<TState, TContext> updatable)
+                updatable.OnUpdate(_currentState, deltaTime, scaledTime, unscaledTime, _context);
+        }
+        
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void FixedUpdate(float fixedDeltaTime, float fixedTime, float fixedUnscaledTime)
+        {
+            if (_isPaused) return;
+
+            if (_currentHandler is IFixedUpdatableHandler<TState, TContext> fixedUpdatable)
+                fixedUpdatable.OnFixedUpdate(_currentState, fixedDeltaTime, fixedTime, fixedUnscaledTime, _context);
+        }
+
+        public void Pause() => _isPaused = true;
+        public void Resume() => _isPaused = false;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int GetStateIndex(TState state) => UnsafeUtility.As<TState, int>(ref state);
+
+        public void Dispose() => _currentHandler.OnExit(_currentState, default);
     }
 }
