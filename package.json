@@ -1,7 +1,7 @@
 {
   "name": "cn.refactor.fsm",
   "displayName": "Refactor Fsm",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "description": "有限状态机.",
   "unity": "2021.3",
   "license": "MIT",
