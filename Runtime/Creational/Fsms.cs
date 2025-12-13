@@ -102,6 +102,12 @@ namespace Refactor.Fsm
             return this;
         }
 
+        public ContextRequiredBuilder<TState, TContext> WithoutStack()
+        {
+            _stackCapacity = null;
+            return this;
+        }
+
         public Fsm<TState, TContext> Build()
         {
             return new Fsm<TState, TContext>(_states, _initialState, _context, _stackCapacity);
