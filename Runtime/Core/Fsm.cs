@@ -1,4 +1,4 @@
-﻿#nullable enable
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -6,35 +6,76 @@ using Unity.Collections.LowLevel.Unsafe;
 
 namespace Refactor.Fsm
 {
-    public sealed class Fsm<TState, TContext> : IDisposable
+    public sealed class Fsm<TState, TContext>
         where TState : struct, Enum
     {
-        private readonly IStateHandler<TState>[] _states;
+        public readonly struct StateInfo
+        {
+            public readonly IStateHandler<TState, TContext> Handler;
+            public readonly IUpdatable<TContext>? Updatable;
+            public readonly IFixedUpdatable<TContext>? FixedUpdatable;
+            public readonly ISuspendable<TContext>? Suspendable;
+
+            public StateInfo(IStateHandler<TState, TContext> handler)
+            {
+                Handler        = handler;
+                Updatable      = handler as IUpdatable<TContext>;
+                FixedUpdatable = handler as IFixedUpdatable<TContext>;
+                Suspendable    = handler as ISuspendable<TContext>;
+            }
+        }
+
+        private readonly StateInfo[] _states;
         private TState _currentState;
-        private IStateHandler<TState> _currentHandler;
+        private StateInfo _currentStateInfo;
         private TContext _context;
         private bool _isPaused;
-        private IStackPolicy<TState>? _stackPolicy;
+
+        private readonly TState[]? _stack;
+        private int _stackCount;
 
         public TState CurrentState => _currentState;
         public ref TContext Context => ref _context;
         public bool IsPaused => _isPaused;
 
+        #region Creational
+
         internal Fsm(
-            IStateHandler<TState>[] states,
+            StateInfo[] states,
             TState initialState,
             TContext context,
-            IStackPolicy<TState>? stackPolicy)
+            int? stackCapacity)
         {
-            _states = states;
+            _states       = states;
             _currentState = initialState;
-            _context = context;
-            _stackPolicy = stackPolicy;
+            _context      = context;
+            
+            if (stackCapacity.HasValue && stackCapacity.Value > 0)
+            {
+                _stack      = new TState[stackCapacity.Value];
+                _stackCount = 0;
+            }
 
             var index = GetStateIndex(initialState);
-            _currentHandler = _states[index];
-            _currentHandler.OnEnter(initialState, initialState);
+            _currentStateInfo = _states[index];
+            
+            // 注意: 第一次进入时, fromState 与 initialState相同.
+            _currentStateInfo.Handler.OnEnter(initialState, _context);
         }
+        
+        internal StateInfo[] GetStates()
+        {
+            var copy = new StateInfo[_states.Length];
+            Array.Copy(_states, copy, _states.Length);
+            return copy;
+        }
+
+        internal int? GetStackCapacity() => _stack?.Length;
+
+        #endregion
+
+        public void Pause() => _isPaused = true;
+        public void Resume() => _isPaused = false;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void GoTo(TState newState)
@@ -43,52 +84,73 @@ namespace Refactor.Fsm
                 return;
 
             var newIndex = GetStateIndex(newState);
-            var newHandler = _states[newIndex];
+            if (newIndex < 0 || newIndex >= _states.Length || _states[newIndex].Handler == null)
+                throw new InvalidOperationException($"State {newState} is not registered.");
+
+            var newStateInfo = _states[newIndex];
             var oldState = _currentState;
 
-            _currentHandler.OnExit(oldState, newState);
+            _currentStateInfo.Handler.OnExit(newState, _context);
+            
             _currentState = newState;
-            _currentHandler = newHandler;
-            newHandler.OnEnter(newState, oldState);
+            _currentStateInfo = newStateInfo;
+            
+            _currentStateInfo.Handler.OnEnter(oldState, _context);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Push(TState newState)
         {
-            if (_stackPolicy == null)
+            if (_stack == null)
                 throw new InvalidOperationException("Stack not enabled. Use .WithStack() to enable.");
 
-            if (_currentHandler is ISuspendableHandler<TState> suspendable)
-                suspendable.OnSuspend(_currentState);
+            if (_stackCount >= _stack.Length)
+                throw new InvalidOperationException($"Stack overflow (max: {_stack.Length})");
+
+            // 挂起当前状态.
+            if (_currentStateInfo.Suspendable != null)
+                _currentStateInfo.Suspendable.OnSuspend(_context);
             else
-                _currentHandler.OnExit(_currentState, newState);
+                _currentStateInfo.Handler.OnExit(newState, _context);
 
-            _stackPolicy.Push(_currentState, _currentHandler);
+            // 将当前状态压入栈.
+            _stack[_stackCount++] = _currentState;
 
+            // 进入新状态.
             var newIndex = GetStateIndex(newState);
-            var newHandler = _states[newIndex];
+            if (newIndex < 0 || newIndex >= _states.Length || _states[newIndex].Handler == null)
+                throw new InvalidOperationException($"State {newState} is not registered.");
+
+            var newStateInfo = _states[newIndex];
             var oldState = _currentState;
 
             _currentState = newState;
-            _currentHandler = newHandler;
-            newHandler.OnEnter(newState, oldState);
+            _currentStateInfo = newStateInfo;
+            
+            _currentStateInfo.Handler.OnEnter(oldState, _context);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Pop()
         {
-            if (_stackPolicy == null || !_stackPolicy.TryPop(out var previousState, out var previousHandler))
+            if (_stack == null || _stackCount == 0)
                 return;
 
+            var previousState = _stack[--_stackCount];
             var currentState = _currentState;
-            _currentHandler.OnExit(currentState, previousState);
-            _currentState = previousState;
-            _currentHandler = previousHandler;
+            
+            // 退出当前状态.
+            _currentStateInfo.Handler.OnExit(previousState, _context);
 
-            if (previousHandler is ISuspendableHandler<TState> suspendable)
-                suspendable.OnResume(previousState);
+            // 恢复前一个状态.
+            _currentState = previousState;
+            var prevIndex = GetStateIndex(previousState);
+            _currentStateInfo = _states[prevIndex];
+
+            if (_currentStateInfo.Suspendable != null)
+                _currentStateInfo.Suspendable.OnResume(_context);
             else
-                previousHandler.OnEnter(previousState, currentState);
+                _currentStateInfo.Handler.OnEnter(currentState, _context);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -96,8 +158,7 @@ namespace Refactor.Fsm
         {
             if (_isPaused) return;
 
-            if (_currentHandler is IUpdatableHandler<TState, TContext> updatable)
-                updatable.OnUpdate(_currentState, deltaTime, scaledTime, unscaledTime, _context);
+            _currentStateInfo.Updatable?.OnUpdate(deltaTime, scaledTime, unscaledTime, _context);
         }
         
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -105,16 +166,10 @@ namespace Refactor.Fsm
         {
             if (_isPaused) return;
 
-            if (_currentHandler is IFixedUpdatableHandler<TState, TContext> fixedUpdatable)
-                fixedUpdatable.OnFixedUpdate(_currentState, fixedDeltaTime, fixedTime, fixedUnscaledTime, _context);
+            _currentStateInfo.FixedUpdatable?.OnFixedUpdate(fixedDeltaTime, fixedTime, fixedUnscaledTime, _context);
         }
-
-        public void Pause() => _isPaused = true;
-        public void Resume() => _isPaused = false;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private int GetStateIndex(TState state) => UnsafeUtility.As<TState, int>(ref state);
-
-        public void Dispose() => _currentHandler.OnExit(_currentState, default);
     }
 }
