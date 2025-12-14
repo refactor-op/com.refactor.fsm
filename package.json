@@ -1,18 +1,12 @@
 {
   "name": "com.refactor.fsm",
   "displayName": "Refactor Fsm",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "description": "Fsm.",
   "unity": "2021.3",
   "license": "MIT",
   "repository": {
     "type": "git", 
     "url": "https://github.com/refactor-op/com.refactor.fsm.git"
-  },
-  "files": [
-    "package.json",
-    "Runtime/",
-    "Tests/",
-    "README.md"
-  ]
+  }
 }
