@@ -1,5 +1,5 @@
 {
-  "name": "cn.refactor.fsm",
+  "name": "com.refactor.fsm",
   "displayName": "Refactor Fsm",
   "version": "0.9.11",
   "description": "有限状态机.",
@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git", 
-    "url": "https://github.com/refactor-op/cn.refactor.fsm.git"
+    "url": "https://github.com/refactor-op/com.refactor.fsm.git"
   },
   "files": [
     "package.json",
