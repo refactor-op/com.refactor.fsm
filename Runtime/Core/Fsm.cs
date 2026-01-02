@@ -9,167 +9,157 @@ namespace Refactor.Fsm
     public sealed class Fsm<TState, TContext>
         where TState : struct, Enum
     {
-        public readonly struct StateInfo
+        public readonly struct State
         {
-            public readonly IStateHandler<TState, TContext> Handler;
+            public readonly TState Id;
+            public readonly IEnterHandler<TState, TContext>? Enter;
+            public readonly IExitHandler<TState, TContext>? Exit;
             public readonly IUpdatable<TContext>? Updatable;
             public readonly IFixedUpdatable<TContext>? FixedUpdatable;
-            public readonly ISuspendable<TContext>? Suspendable;
+            public readonly ILateUpdatable<TContext>? LateUpdatable;
 
-            public StateInfo(IStateHandler<TState, TContext> handler)
+            public State(TState id, object handler)
             {
-                Handler        = handler;
+                Id             = id;
+                Enter          = handler as IEnterHandler<TState, TContext>;
+                Exit           = handler as IExitHandler<TState, TContext>;
                 Updatable      = handler as IUpdatable<TContext>;
                 FixedUpdatable = handler as IFixedUpdatable<TContext>;
-                Suspendable    = handler as ISuspendable<TContext>;
+                LateUpdatable  = handler as ILateUpdatable<TContext>;
             }
+
+            public bool HasAnyHandler =>
+                Enter != null || Exit != null || 
+                Updatable != null || FixedUpdatable != null || LateUpdatable != null;
         }
 
-        private readonly StateInfo[] _states;
-        private TState _currentState;
-        private StateInfo _currentStateInfo;
+        private readonly State[] _states;
+
+        private State _current;
         private TContext _context;
         private bool _isPaused;
 
-        private readonly TState[]? _stack;
-        private int _stackCount;
-
-        public TState CurrentState => _currentState;
+        public ref readonly State CurrentState => ref _current;
         public ref TContext Context => ref _context;
         public bool IsPaused => _isPaused;
 
         #region Creational
 
-        internal Fsm(
-            StateInfo[] states,
-            TState initialState,
-            TContext context,
-            int? stackCapacity)
+        internal Fsm(State[] states, TState initialState, TContext context)
         {
-            _states       = states;
-            _currentState = initialState;
-            _context      = context;
-            
-            if (stackCapacity.HasValue && stackCapacity.Value > 0)
-            {
-                _stack      = new TState[stackCapacity.Value];
-                _stackCount = 0;
-            }
+            _states  = states;
+            _context = context;
 
             var index = GetStateIndex(initialState);
-            _currentStateInfo = _states[index];
-            
-            // 注意: 第一次进入时, fromState 与 initialState相同.
-            _currentStateInfo.Handler.OnEnter(initialState, _context);
+            _current = _states[index];
+
+            _current.Enter?.OnEnter(default, _context);
         }
-        
-        internal StateInfo[] GetStates()
+
+        internal State[] GetStates()
         {
-            var copy = new StateInfo[_states.Length];
+            var copy = new State[_states.Length];
             Array.Copy(_states, copy, _states.Length);
             return copy;
         }
 
-        internal int? GetStackCapacity() => _stack?.Length;
+        #endregion
+
+        #region Control
+
+        /// <summary>暂停 Update/FixedUpdate/LateUpdate 循环.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Pause() => _isPaused = true;
+
+        /// <summary>恢复 Update/FixedUpdate/LateUpdate 循环.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Resume() => _isPaused = false;
 
         #endregion
 
-        public void Pause() => _isPaused = true;
-        public void Resume() => _isPaused = false;
+        #region Transition
 
+        /// <summary>
+        /// 转换到新状态.
+        /// <para>如果目标状态与当前状态相同, 不执行任何操作.</para>
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void GoTo(TState newState)
         {
-            if (EqualityComparer<TState>.Default.Equals(_currentState, newState))
+            if (EqualityComparer<TState>.Default.Equals(_current.Id, newState))
                 return;
 
             var newIndex = GetStateIndex(newState);
-            if (newIndex < 0 || newIndex >= _states.Length || _states[newIndex].Handler == null)
-                throw new InvalidOperationException($"State {newState} is not registered.");
+            var newStateData = _states[newIndex];
+            var oldState = _current.Id;
 
-            var newStateInfo = _states[newIndex];
-            var oldState = _currentState;
+            _current.Exit?.OnExit(newState, _context);
 
-            _currentStateInfo.Handler.OnExit(newState, _context);
-            
-            _currentState = newState;
-            _currentStateInfo = newStateInfo;
-            
-            _currentStateInfo.Handler.OnEnter(oldState, _context);
+            _current = newStateData;
+
+            _current.Enter?.OnEnter(oldState, _context);
         }
 
+        /// <summary>
+        /// 重新进入当前状态 (触发 Exit => Enter).
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Push(TState newState)
+        public void Reenter()
         {
-            if (_stack == null)
-                throw new InvalidOperationException("Stack not enabled. Use .WithStack() to enable.");
-
-            if (_stackCount >= _stack.Length)
-                throw new InvalidOperationException($"Stack overflow (max: {_stack.Length})");
-
-            // 挂起当前状态.
-            if (_currentStateInfo.Suspendable != null)
-                _currentStateInfo.Suspendable.OnSuspend(_context);
-            else
-                _currentStateInfo.Handler.OnExit(newState, _context);
-
-            // 将当前状态压入栈.
-            _stack[_stackCount++] = _currentState;
-
-            // 进入新状态.
-            var newIndex = GetStateIndex(newState);
-            if (newIndex < 0 || newIndex >= _states.Length || _states[newIndex].Handler == null)
-                throw new InvalidOperationException($"State {newState} is not registered.");
-
-            var newStateInfo = _states[newIndex];
-            var oldState = _currentState;
-
-            _currentState = newState;
-            _currentStateInfo = newStateInfo;
-            
-            _currentStateInfo.Handler.OnEnter(oldState, _context);
+            var state = _current.Id;
+            _current.Exit?.OnExit(state, _context);
+            _current.Enter?.OnEnter(state, _context);
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Pop()
-        {
-            if (_stack == null || _stackCount == 0)
-                return;
+        #endregion
 
-            var previousState = _stack[--_stackCount];
-            var currentState = _currentState;
-            
-            // 退出当前状态.
-            _currentStateInfo.Handler.OnExit(previousState, _context);
-
-            // 恢复前一个状态.
-            _currentState = previousState;
-            var prevIndex = GetStateIndex(previousState);
-            _currentStateInfo = _states[prevIndex];
-
-            if (_currentStateInfo.Suspendable != null)
-                _currentStateInfo.Suspendable.OnResume(_context);
-            else
-                _currentStateInfo.Handler.OnEnter(currentState, _context);
-        }
+        #region Update
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Update(float deltaTime, float scaledTime, float unscaledTime)
+        public void Update()
         {
             if (_isPaused) return;
-
-            _currentStateInfo.Updatable?.OnUpdate(deltaTime, scaledTime, unscaledTime, _context);
+            _current.Updatable?.OnUpdate(_context);
         }
-        
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void FixedUpdate(float fixedDeltaTime, float fixedTime, float fixedUnscaledTime)
+        public void FixedUpdate()
         {
             if (_isPaused) return;
-
-            _currentStateInfo.FixedUpdatable?.OnFixedUpdate(fixedDeltaTime, fixedTime, fixedUnscaledTime, _context);
+            _current.FixedUpdatable?.OnFixedUpdate(_context);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private int GetStateIndex(TState state) => UnsafeUtility.As<TState, int>(ref state);
+        public void LateUpdate()
+        {
+            if (_isPaused) return;
+            _current.LateUpdatable?.OnLateUpdate(_context);
+        }
+
+        #endregion
+
+        #region Indexer
+
+        private static readonly Func<TState, int> _toIndex = CreateIndexer();
+
+        private static Func<TState, int> CreateIndexer()
+        {
+            var underlying = Enum.GetUnderlyingType(typeof(TState));
+
+            if (underlying == typeof(byte))   return state => UnsafeUtility.As<TState, byte>(ref state);
+            if (underlying == typeof(sbyte))  return state => UnsafeUtility.As<TState, sbyte>(ref state);
+            if (underlying == typeof(short))  return state => UnsafeUtility.As<TState, short>(ref state);
+            if (underlying == typeof(ushort)) return state => UnsafeUtility.As<TState, ushort>(ref state);
+            if (underlying == typeof(int))    return state => UnsafeUtility.As<TState, int>(ref state);
+            if (underlying == typeof(uint))   return state => (int)UnsafeUtility.As<TState, uint>(ref state);
+
+            throw new NotSupportedException(
+                $"Enum {typeof(TState).Name} uses unsupported underlying type {underlying.Name}.");
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int GetStateIndex(TState state) => _toIndex(state);
+
+        #endregion
     }
 }

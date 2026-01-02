@@ -1,26 +1,30 @@
+#nullable enable
 using System;
 
 namespace Refactor.Fsm
 {
-    public interface IStateHandler<TState, TContext> where TState : struct, Enum
+    public interface IEnterHandler<TState, TContext> where TState : struct, Enum
     {
         void OnEnter(TState fromState, TContext context);
+    }
+
+    public interface IExitHandler<TState, TContext> where TState : struct, Enum
+    {
         void OnExit(TState toState, TContext context);
     }
 
-    public interface IUpdatable<in TContext>
+    public interface IUpdatable<TContext>
     {
-        void OnUpdate(float deltaTime, float scaledTime, float unscaledTime, TContext context);
+        void OnUpdate(TContext context);
     }
 
-    public interface IFixedUpdatable<in TContext>
+    public interface IFixedUpdatable<TContext>
     {
-        void OnFixedUpdate(float fixedDeltaTime, float fixedTime, float fixedUnscaledTime, TContext context);
+        void OnFixedUpdate(TContext context);
     }
 
-    public interface ISuspendable<in TContext>
+    public interface ILateUpdatable<TContext>
     {
-        void OnSuspend(TContext context);
-        void OnResume(TContext context);
+        void OnLateUpdate(TContext context);
     }
 }

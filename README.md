@@ -1,14 +1,12 @@
 # Refactor.Fsm
 
-通过 Nullable 策略实现栈状态机的零开销抽象，使用共享上下文消除重复传参。
+接口驱动的零 GC 状态机。Update 比 Lambda 方案快 7 倍，创建分配少 2 倍。
 
 ## 哲学
 
-> **任何应用程序，本质上都是一个大型状态机。**
+> **任何应用程序，本质上都是一个大型的分层状态机。**
 
-从游戏流程（Loading → Menu → Playing → GameOver），到 UI 导航（MainMenu → Settings → Graphics），再到 AI 行为（Idle → Chase → Attack），状态与转换无处不在。
-
-而 GameFramework 的 `Procedure` 模块让我对这句话有了更深的感悟：**状态机是抽象流程控制的最佳实现方式。** 它将复杂的流程分解为清晰的状态，用转换逻辑串联起来，既简洁又可维护。
+从游戏流程（Loading → Menu → Playing → GameOver），再到 AI 行为（Idle → Chase → Attack），状态与转换无处不在。
 
 我首先研究了 QFramework 的 FSM 实现，核心思想是用委托（`Action`）表示状态逻辑，用字典管理状态。
 
@@ -29,17 +27,6 @@ fsm.AddState(GameState.Playing, () => {
     _player.Activate();    // 捕获 this.
     _enemyCount = 0;       // 捕获字段.
 });
-
-// 生成的代码类似:
-class <>c__DisplayClass0 {  // 闭包类 (堆分配).
-    public Player _player;
-    public int _enemyCount;
-    
-    public void <AddState>b__0() {
-        _player.Activate();
-        _enemyCount = 0;
-    }
-}
 ```
 
 **每个委托都是一个闭包对象（24+ bytes），注册 10 个状态就是 240+ bytes。**
@@ -47,13 +34,13 @@ class <>c__DisplayClass0 {  // 闭包类 (堆分配).
 为了解决闭包和语义问题，我转向了经典的接口方案：
 
 ```csharp
-public interface IStateHandler<in TState>
+public interface IStateHandler<TState>
 {
     void OnEnter(TState state, TState fromState);
     void OnExit(TState state, TState toState);
 }
 
-public interface IUpdatableHandler<in TState> : IStateHandler<TState>
+public interface IUpdatableHandler<TState> : IStateHandler<TState>
 {
     void OnUpdate(TState state, float deltaTime);
 }
@@ -62,12 +49,12 @@ public interface IUpdatableHandler<in TState> : IStateHandler<TState>
 有了 Handler 接口后，我遇到了新问题：**如何让某些功能可选？**
 
 ```csharp
-// 场景 1: UI 导航 (需要栈).
+// 场景 1: UI (需要栈).
 MainMenu → Settings → Graphics
-Graphics → Pop → Settings  // ✅ 需要返回.
+Graphics → Settings → MainMenu // ✅ 需要返回.
 
 // 场景 2: 游戏流程 (不需要栈).
-Loading → Menu → Playing → GameOver  // ❌ 单向流转.
+Loading → Menu → Playing → GameOver // ❌ 单向流转.
 ```
 
 **第一个想法**：在 FSM 内部加一个 `Stack<State>`
@@ -85,7 +72,7 @@ public class Fsm<TState>
 }
 ```
 
-不用栈的 FSM 也要付出内存成本，且每次调用 Push/Pop 都要运行时判断（性能损失）。
+不用栈的 FSM 也要付出内存成本，且每次调用 Push/Pop 都有性能损失。
 
 ---
 
@@ -113,8 +100,6 @@ Fsm<TState, TContext, TStackPolicy, TTransitionPolicy>
 // TTransitionPolicy: 可选的条件转换.
 ```
 
-**看起来很"学院派"，但问题很快暴露。**
-
 我设计了 TransitionPolicy，希望实现"自动条件转换"：
 
 ```csharp
@@ -138,8 +123,6 @@ void OnHealthChanged(float hp)
         fsm.GoTo(AIState.Retreat);
 }
 ```
-
-**于是我删除了 TransitionPolicy，API 从 4 个泛型参数减少到 3 个。**
 
 接着第二次质疑：NoStackPolicy 真的需要吗？
 
@@ -175,7 +158,7 @@ public void Push(TState state)
 
 **我一开始的假设是**：Policy-Based 能避免分支，性能更好。
 
-**但测量结果震惊了我。**
+但测量结果：
 
 ```
 Policy-Based: 18.23 ns
@@ -193,96 +176,225 @@ Nullable:      6.50 ns <- 快了 64%！
 - 其状态继承可以通过 `AStateHandler : BStateHandler` 实现
 - 分层状态机可以通过状态持有状态机实现多层状态机实现
 
-## 使用
+借此，一个基于状态栈的状态机诞生了，但后来，借助奥卡姆剃刀，我对设计进行了更激进的简化：
+
+**删除状态栈！**
+
+**问题**：
+- 栈逻辑与 FSM 核心职责正交
+
+**新设计**：删除内置栈，用户可以用装饰器或外部栈实现：
 
 ```csharp
-public interface IStateHandler<in TState>
+// 用户自己管理栈.
+var stack = new Stack<State>();
+stack.Push(currentState);
+fsm.GoTo(newState);
+
+// 返回.
+var previous = stack.Pop();
+fsm.GoTo(previous);
+```
+
+进一步，我删除了 ISuspendable：
+
+**原设计**：`ISuspendable` 接口提供 `OnSuspend`/`OnResume` 钩子。
+
+**问题**：与 `OnEnter`/`OnExit` 语义重叠，Handler 需要判断"是 Push 还是 GoTo"。
+
+**新设计**：通过 `fromState`/`toState` 参数，Handler 自行判断：
+
+```csharp
+public void OnExit(State toState, Context ctx)
 {
-    // ...
+    if (toState == State.Paused)
+    {
+        // 暂停逻辑 (类似 Suspend).
+    }
+    else
+    {
+        // 正常退出逻辑.
+    }
+}
+```
+
+继续删除 Update 钩子的时间参数：
+
+**原设计**：`OnUpdate(float deltaTime, float scaledTime, float unscaledTime)`。
+
+**问题**：
+- 每次调用传递 3 个参数，增加调用开销
+- Unity 已有 `Time.deltaTime` 静态访问
+
+**新设计**：Handler 通过 `Time.deltaTime` 自行获取：
+
+```csharp
+public void OnUpdate(Context ctx)
+{
+    ctx.Transform.position += velocity * Time.deltaTime;
+}
+```
+
+接着是拆分接口：
+
+**原设计**：`IStateHandler` 强制实现 `OnEnter` + `OnExit`。
+
+**问题**：很多状态只需要其中一个，强制实现导致空方法。
+
+**新设计**：独立的可选接口：
+
+```csharp
+// 只需要 Enter.
+class IdleHandler : IEnterHandler<State, Context>
+{
+    public void OnEnter(State from, Context ctx) { }
 }
 
-public interface IUpdatableHandler<in TState, in TContext> : IStateHandler<TState>
+// 只需要 Update.
+class MoveHandler : IUpdatable<Context>
 {
-    // ...
+    public void OnUpdate(Context ctx) { }
+}
+```
+
+另外，还有 Handler 类型设计
+
+**考虑过的方案**：
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| `object handler` | API 简洁 | 无编译时类型检查 |
+| `IStateHandler` 标记接口 | 类型安全 | 需要额外接口 |
+| 泛型约束 | 完全类型安全 | 泛型爆炸 |
+| struct Handler | 避免 GC | 接口存储会装箱 |
+
+**Benchmark 结论**：
+
+```
+object (3x as 转换): 4ms / 10M
+IStateHandler (3x as 转换): 7ms / 10M
+```
+
+`as` 转换极快（0.4ns/次），标记接口没有性能收益。最终选择 `object handler`。
+
+于是最终接口：
+
+```csharp
+// 全部可选.
+IEnterHandler<TState, TContext>   // void OnEnter(TState fromState, TContext ctx).
+IExitHandler<TState, TContext>    // void OnExit(TState toState, TContext ctx).
+IUpdatable<TContext>              // void OnUpdate(TContext ctx).
+IFixedUpdatable<TContext>         // void OnFixedUpdate(TContext ctx).
+ILateUpdatable<TContext>          // void OnLateUpdate(TContext ctx).
+```
+
+至此，Fsm 已无大碍，将目光转向 Builder，之前，Builder 使用 `new State[]` 分配数组，借助后一个包 Gas 的设计，选择使用 `ArrayPool<State>.Shared` 池化数组。
+
+---
+
+### Benchmark 验证
+
+对比接口方案和 Lambda 方案（类似 QFramework/UnityHFSM）：
+
+- **Update 快 13 倍**：接口方案在每帧调用的热路径上是明显优势（1.3ns 几乎等于直接调用开销）。
+- **GoTo 慢 2 倍**：Lambda 方案的小字典查找在 CPU 缓存命中极高时非常快（~5ns），而 Struct 拷贝（32 bytes）带来了些许开销（~11ns）。考虑到状态切换频率远低于 Update，这是完全可接受的权衡。
+- **创建 GC 少 2 倍**：接口方案每 FSM 只需 336 bytes，且无闭包隐患。
+
+## 使用
+
+### 接口
+
+```csharp
+// 进入状态时.
+public interface IEnterHandler<TState, TContext>
+{
+    void OnEnter(TState fromState, TContext context);
 }
 
-public interface ISuspendableHandler<in TState> : IStateHandler<TState>
+// 退出状态时.
+public interface IExitHandler<TState, TContext>
 {
-    // ...
+    void OnExit(TState toState, TContext context);
 }
 
+// Update 循环.
+public interface IUpdatable<TContext>
+{
+    void OnUpdate(TContext context);
+}
+
+// FixedUpdate 循环.
+public interface IFixedUpdatable<TContext>
+{
+    void OnFixedUpdate(TContext context);
+}
+
+// LateUpdate 循环.
+public interface ILateUpdatable<TContext>
+{
+    void OnLateUpdate(TContext context);
+}
+```
+
+### 创建与操作
+
+```csharp
 // 创建.
-var fsm = FsmBuilder.Create<TState, TContext>()
+var fsm = Fsms.Create<TState, TContext>()
     .With(state, handler)
     .WithContext(context)
-    .WithStack(capacity)  // 可选.
     .Build();
 
 // 操作.
-fsm.GoTo(state); // 不可返回的转换.
-fsm.Push(state); // 可返回的推栈.
-fsm.Pop();       // 弹栈.
+fsm.GoTo(state);   // 转换状态.
+fsm.Reenter();     // 重新进入当前状态 (Exit → Enter).
 
 // 更新.
-fsm.Update(Time.deltaTime, Time.time, Time.unscaledTime);
+fsm.Update();
+fsm.FixedUpdate();
+fsm.LateUpdate();
 
 // 暂停/恢复.
 fsm.Pause();
 fsm.Resume();
 
 // 查询.
-fsm.CurrentState
-fsm.IsPaused
+fsm.CurrentState   // 当前状态.
+fsm.Context        // 共享上下文.
+fsm.IsPaused       // 是否暂停.
 ```
 
 ### 共享上下文
 
 ```csharp
-// 定义上下文（推荐 struct）
-public struct AIContext
+// 定义上下文
+public class PlayerContext
 {
     public Transform Transform;
-    public float HP;
-    public Vector3 EnemyPosition;
+    public Animator Animator;
+    public Fsm<PlayerState, PlayerContext> Fsm;  // 可持有 FSM 引用.
 }
 
-// 传入 FSM
-.WithContext(context)
-
-// Handler 中访问
-public void OnUpdate(AIState state, float dt, float scaled, float unscaled, AIContext ctx)
+// Handler 中访问.
+public void OnUpdate(PlayerContext ctx)
 {
-    ctx.Transform.position += velocity * dt;
+    if (ctx.Input.Move != Vector2.zero)
+        ctx.Fsm.GoTo(PlayerState.Walk);
 }
 
-// 外部修改
+// 外部修改.
 fsm.Context.HP = newHP;
 ```
 
-### 栈状态机
+### 状态增删改
 
 ```csharp
-public enum UIState { MainMenu, Settings, Graphics, Audio }
-
-var fsm = FsmBuilder.Create<UIState, EmptyContext>()
-    .With(UIState.MainMenu, new MainMenuHandler())
-    .With(UIState.Settings, new SettingsHandler())
-    .WithContext(new EmptyContext())
-    .WithStack(capacity: 8)  // 启用栈.
+// 从现有 FSM 克隆并修改.
+var derivedFsm = Fsms.From(existing)
+    .With(State.NewState, new NewHandler())  // 添加.
+    .Without(State.OldState)                  // 移除.
     .Build();
-
-// 推入新状态 (可返回).
-fsm.Push(UIState.Settings); // MainMenu -> Settings.
-fsm.Push(UIState.Graphics); // Settings -> Graphics.
-
-// 返回上一个状态.
-fsm.Pop(); // Graphics -> Settings.
-fsm.Pop(); // Settings -> MainMenu.
 ```
-
-## 许可证
-
-MIT License
 
 ## 贡献
 

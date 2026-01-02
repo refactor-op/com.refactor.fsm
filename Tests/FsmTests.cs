@@ -1,6 +1,4 @@
-using System;
 using NUnit.Framework;
-using Refactor.Fsm;
 
 namespace Refactor.Fsm.Tests
 {
@@ -9,37 +7,36 @@ namespace Refactor.Fsm.Tests
         public enum State { Idle, Move, Attack, Dead }
         public class Context { public int Value; }
 
-        private class SpyHandler : IStateHandler<State, Context>, 
-                                   IUpdatable<Context>, 
-                                   IFixedUpdatable<Context>, 
-                                   ISuspendable<Context>
+        private class SpyHandler : IEnterHandler<State, Context>,
+                                   IExitHandler<State, Context>,
+                                   IUpdatable<Context>,
+                                   IFixedUpdatable<Context>,
+                                   ILateUpdatable<Context>
         {
             public int EnterCount;
             public int ExitCount;
             public int UpdateCount;
             public int FixedUpdateCount;
-            public int SuspendCount;
-            public int ResumeCount;
+            public int LateUpdateCount;
 
             public State LastEnteredFrom;
             public State LastExitedTo;
 
-            public void OnEnter(State fromState, Context context) 
-            { 
-                EnterCount++; 
-                LastEnteredFrom = fromState; 
+            public void OnEnter(State fromState, Context context)
+            {
+                EnterCount++;
+                LastEnteredFrom = fromState;
             }
 
-            public void OnExit(State toState, Context context) 
-            { 
-                ExitCount++; 
-                LastExitedTo = toState; 
+            public void OnExit(State toState, Context context)
+            {
+                ExitCount++;
+                LastExitedTo = toState;
             }
 
-            public void OnUpdate(float dt, float st, float ust, Context context) => UpdateCount++;
-            public void OnFixedUpdate(float fdt, float ft, float fust, Context context) => FixedUpdateCount++;
-            public void OnSuspend(Context context) => SuspendCount++;
-            public void OnResume(Context context) => ResumeCount++;
+            public void OnUpdate(Context context) => UpdateCount++;
+            public void OnFixedUpdate(Context context) => FixedUpdateCount++;
+            public void OnLateUpdate(Context context) => LateUpdateCount++;
         }
 
         private Context _context;
@@ -64,9 +61,9 @@ namespace Refactor.Fsm.Tests
                 .Build();
 
             // Assert
-            Assert.AreEqual(State.Idle, fsm.CurrentState);
+            Assert.AreEqual(State.Idle, fsm.CurrentState.Id);
             Assert.AreEqual(1, _idleHandler.EnterCount, "Should enter initial state immediately");
-            Assert.AreEqual(State.Idle, _idleHandler.LastEnteredFrom, "Initial entry 'from' state should be itself");
+            Assert.AreEqual(default(State), _idleHandler.LastEnteredFrom, "Initial entry 'from' state should be default");
         }
 
         [Test]
@@ -83,8 +80,8 @@ namespace Refactor.Fsm.Tests
             fsm.GoTo(State.Move);
 
             // Assert
-            Assert.AreEqual(State.Move, fsm.CurrentState);
-            
+            Assert.AreEqual(State.Move, fsm.CurrentState.Id);
+
             // Check Idle Exit
             Assert.AreEqual(1, _idleHandler.ExitCount);
             Assert.AreEqual(State.Move, _idleHandler.LastExitedTo);
@@ -114,7 +111,7 @@ namespace Refactor.Fsm.Tests
         }
 
         [Test]
-        public void GoTo_UnregisteredState_ThrowsException()
+        public void Reenter_TriggersExitAndEnter()
         {
             // Arrange
             var fsm = Fsms.Create<State, Context>()
@@ -122,30 +119,16 @@ namespace Refactor.Fsm.Tests
                 .WithContext(_context)
                 .Build();
 
-            // Act & Assert
-            var ex = Assert.Throws<InvalidOperationException>(() => fsm.GoTo(State.Dead));
-            Assert.That(ex.Message, Does.Contain("not registered"));
-        }
+            _idleHandler.EnterCount = 0; // Reset after init
 
-        [Test]
-        public void GoTo_RemovedState_ThrowsDetailedException()
-        {
-            // Arrange
-            var fsm = Fsms.Create<State, Context>()
-                .With(State.Idle, _idleHandler)
-                .With(State.Dead, new SpyHandler()) // Initially added
-                .WithContext(_context)
-                .Build();
+            // Act
+            fsm.Reenter();
 
-            // Create a derived FSM with Dead removed
-            var derivedFsmBuilder = Fsms.From(fsm)
-                .Without(State.Dead);
-                
-            var derivedFsm = derivedFsmBuilder.Build();
-
-            // Act & Assert
-            var ex = Assert.Throws<InvalidOperationException>(() => derivedFsm.GoTo(State.Dead));
-            Assert.That(ex.Message, Does.Contain("removed via .Without"), "Should provide helpful error message for removed states");
+            // Assert
+            Assert.AreEqual(1, _idleHandler.ExitCount);
+            Assert.AreEqual(1, _idleHandler.EnterCount);
+            Assert.AreEqual(State.Idle, _idleHandler.LastEnteredFrom);
+            Assert.AreEqual(State.Idle, _idleHandler.LastExitedTo);
         }
 
         [Test]
@@ -158,12 +141,14 @@ namespace Refactor.Fsm.Tests
                 .Build();
 
             // Act
-            fsm.Update(1f, 1f, 1f);
-            fsm.FixedUpdate(1f, 1f, 1f);
+            fsm.Update();
+            fsm.FixedUpdate();
+            fsm.LateUpdate();
 
             // Assert
             Assert.AreEqual(1, _idleHandler.UpdateCount);
             Assert.AreEqual(1, _idleHandler.FixedUpdateCount);
+            Assert.AreEqual(1, _idleHandler.LateUpdateCount);
         }
 
         [Test]
@@ -177,78 +162,90 @@ namespace Refactor.Fsm.Tests
 
             // Act
             fsm.Pause();
-            fsm.Update(1f, 1f, 1f);
-            
+            fsm.Update();
+
             // Assert
             Assert.AreEqual(0, _idleHandler.UpdateCount);
             Assert.IsTrue(fsm.IsPaused);
 
             // Act - Resume
             fsm.Resume();
-            fsm.Update(1f, 1f, 1f);
-            
+            fsm.Update();
+
             // Assert
             Assert.AreEqual(1, _idleHandler.UpdateCount);
             Assert.IsFalse(fsm.IsPaused);
         }
 
         [Test]
-        public void Stack_Push_SuspendsCurrent_EntersNew()
+        public void From_ClonesAndModifies()
         {
             // Arrange
             var fsm = Fsms.Create<State, Context>()
                 .With(State.Idle, _idleHandler)
                 .With(State.Move, _moveHandler)
                 .WithContext(_context)
-                .WithStack()
+                .Build();
+
+            // Create a derived FSM with Attack added
+            var attackHandler = new SpyHandler();
+            var derivedFsm = Fsms.From(fsm)
+                .With(State.Attack, attackHandler)
                 .Build();
 
             // Act
-            fsm.Push(State.Move);
+            derivedFsm.GoTo(State.Attack);
 
             // Assert
-            Assert.AreEqual(State.Move, fsm.CurrentState);
-            Assert.AreEqual(1, _idleHandler.SuspendCount, "Push should Suspend previous state");
-            Assert.AreEqual(0, _idleHandler.ExitCount, "Push should NOT Exit previous state if it is Suspendable");
-            Assert.AreEqual(1, _moveHandler.EnterCount, "Should Enter new state");
+            Assert.AreEqual(State.Attack, derivedFsm.CurrentState.Id);
+            Assert.AreEqual(1, attackHandler.EnterCount);
         }
 
         [Test]
-        public void Stack_Pop_ExitsCurrent_ResumesPrevious()
+        public void Without_RemovesState()
         {
             // Arrange
             var fsm = Fsms.Create<State, Context>()
                 .With(State.Idle, _idleHandler)
                 .With(State.Move, _moveHandler)
                 .WithContext(_context)
-                .WithStack()
                 .Build();
 
-            fsm.Push(State.Move); // Stack: [Idle], Current: Move
+            // Create a derived FSM with Move removed
+            var derivedFsm = Fsms.From(fsm)
+                .Without(State.Move)
+                .Build();
 
-            // Act
-            fsm.Pop(); // Should go back to Idle
+            // Act - GoTo removed state should not have handler
+            derivedFsm.GoTo(State.Move);
 
-            // Assert
-            Assert.AreEqual(State.Idle, fsm.CurrentState);
-            Assert.AreEqual(1, _moveHandler.ExitCount, "Should Exit popped state");
-            Assert.AreEqual(1, _idleHandler.ResumeCount, "Should Resume previous state");
-            Assert.AreEqual(1, _idleHandler.EnterCount, "Should NOT re-Enter previous state (Resume instead)");
+            // Assert - Move state has no handlers, so no callbacks
+            // (Current design allows transition but no callbacks)
+            Assert.AreEqual(State.Move, derivedFsm.CurrentState.Id);
         }
 
         [Test]
-        public void Stack_WithoutStackEnabled_ThrowsException()
+        public void Build_WithoutContext_ThrowsException()
         {
-            // Arrange
-            var fsm = Fsms.Create<State, Context>()
-                .With(State.Idle, _idleHandler)
-                .WithContext(_context)
-                .WithoutStack() // Explicitly disabled
-                .Build();
+            // Arrange & Act & Assert
+            Assert.Throws<System.InvalidOperationException>(() =>
+            {
+                Fsms.Create<State, Context>()
+                    .With(State.Idle, _idleHandler)
+                    .Build();
+            });
+        }
 
-            // Act & Assert
-            var ex = Assert.Throws<InvalidOperationException>(() => fsm.Push(State.Idle));
-            Assert.That(ex.Message, Does.Contain("Stack not enabled"));
+        [Test]
+        public void Build_WithoutStates_ThrowsException()
+        {
+            // Arrange & Act & Assert
+            Assert.Throws<System.InvalidOperationException>(() =>
+            {
+                Fsms.Create<State, Context>()
+                    .WithContext(_context)
+                    .Build();
+            });
         }
     }
 }

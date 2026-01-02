@@ -1,158 +1,77 @@
 #nullable enable
 using System;
+using System.Buffers;
 using System.Runtime.CompilerServices;
-using Unity.Collections.LowLevel.Unsafe;
 
 namespace Refactor.Fsm
 {
     public static class Fsms
     {
-        public static InitialBuilder<TState, TContext> Create<TState, TContext>() where TState : struct, Enum
-        {
-            return new InitialBuilder<TState, TContext>
-            {
-                _states = new Fsm<TState, TContext>.StateInfo[InitialBuilder<TState, TContext>.GetMaxEnumValue<TState>() + 1],
-                _initialState = default,
-                _initialStateSet = false
-            };
-        }
-
-        public static FsmBuilder<TState, TContext> From<TState, TContext>(Fsm<TState, TContext> existingFsm)
+        public static FsmBuilder<TState, TContext> Create<TState, TContext>()
             where TState : struct, Enum
-        {
-            return new FsmBuilder<TState, TContext>(
-                existingFsm.GetStates(),
-                null,
-                existingFsm.CurrentState,
-                existingFsm.Context,
-                existingFsm.GetStackCapacity()
-            );
-        }
-    }
+            => new();
 
-    public ref struct InitialBuilder<TState, TContext>
-        where TState : struct, Enum
-    {
-        internal Fsm<TState, TContext>.StateInfo[] _states;
-        internal TState _initialState;
-        internal bool _initialStateSet;
-
-        public InitialBuilder<TState, TContext> With(TState state, IStateHandler<TState, TContext> handler)
-        {
-            var index = GetStateIndex(state);
-            _states[index] = new Fsm<TState, TContext>.StateInfo(handler);
-
-            if (!_initialStateSet)
-            {
-                _initialState = state;
-                _initialStateSet = true;
-            }
-
-            return this;
-        }
-
-        public ContextRequiredBuilder<TState, TContext> WithContext(TContext context)
-        {
-            if (!_initialStateSet)
-                throw new InvalidOperationException("No states registered. Use .With() first.");
-
-            return new ContextRequiredBuilder<TState, TContext>(_states, _initialState, context);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private int GetStateIndex(TState state) => UnsafeUtility.As<TState, int>(ref state);
-
-        internal static int GetMaxEnumValue<T>() where T : struct, Enum
-        {
-            var values = Enum.GetValues(typeof(T));
-            var max = 0;
-            for (var i = 0; i < values.Length; i++)
-            {
-                var value = (T)values.GetValue(i)!;
-                var intValue = UnsafeUtility.As<T, int>(ref value);
-                if (intValue > max)
-                    max = intValue;
-            }
-            return max;
-        }
-    }
-
-    public ref struct ContextRequiredBuilder<TState, TContext>
-        where TState : struct, Enum
-    {
-        private Fsm<TState, TContext>.StateInfo[] _states;
-        private TState _initialState;
-        private TContext _context;
-        private int? _stackCapacity;
-
-        internal ContextRequiredBuilder(
-            Fsm<TState, TContext>.StateInfo[] states,
-            TState initialState,
-            TContext context)
-        {
-            _states = states;
-            _initialState = initialState;
-            _context = context;
-            _stackCapacity = null;
-        }
-
-        public ContextRequiredBuilder<TState, TContext> WithStack(int capacity = 8)
-        {
-            _stackCapacity = capacity;
-            return this;
-        }
-
-        public ContextRequiredBuilder<TState, TContext> WithoutStack()
-        {
-            _stackCapacity = null;
-            return this;
-        }
-
-        public Fsm<TState, TContext> Build()
-        {
-            return new Fsm<TState, TContext>(_states, _initialState, _context, _stackCapacity);
-        }
+        public static FsmBuilder<TState, TContext> From<TState, TContext>(Fsm<TState, TContext> existing)
+            where TState : struct, Enum
+            => new(existing);
     }
 
     public ref struct FsmBuilder<TState, TContext>
         where TState : struct, Enum
     {
-        private Fsm<TState, TContext>.StateInfo[] _states;
-        private System.Collections.Generic.HashSet<int>? _removedStates;
-        private TState _initialState;
-        private TContext _context;
-        private int? _stackCapacity;
+        private static readonly ArrayPool<Fsm<TState, TContext>.State> _pool =
+            ArrayPool<Fsm<TState, TContext>.State>.Shared;
 
-        internal FsmBuilder(
-            Fsm<TState, TContext>.StateInfo[] states,
-            System.Collections.Generic.HashSet<int>? removedStates,
-            TState initialState,
-            TContext context,
-            int? stackCapacity)
+        private Fsm<TState, TContext>.State[]? _states;
+        private int _stateCount;
+
+        private TState _initialState;
+        private bool _hasInitialState;
+        private TContext? _context;
+
+        internal FsmBuilder(Fsm<TState, TContext> existing)
         {
-            _states = new Fsm<TState, TContext>.StateInfo[states.Length];
-            Array.Copy(states, _states, states.Length);
-            _removedStates = removedStates != null ? new System.Collections.Generic.HashSet<int>(removedStates) : null;
-            _initialState = initialState;
-            _context = context;
-            _stackCapacity = stackCapacity;
+            var existingStates = existing.GetStates();
+            _states = _pool.Rent(existingStates.Length);
+            _stateCount = existingStates.Length;
+            Array.Copy(existingStates, _states, existingStates.Length);
+
+            _initialState = existing.CurrentState.Id;
+            _hasInitialState = true;
+            _context = existing.Context;
         }
 
-        public FsmBuilder<TState, TContext> With(TState state, IStateHandler<TState, TContext> handler)
+        public FsmBuilder<TState, TContext> With(TState state, object handler)
         {
+            EnsureCapacity();
+
             var index = GetStateIndex(state);
-            _states[index] = new Fsm<TState, TContext>.StateInfo(handler);
-            if (_removedStates != null)
-                _removedStates.Remove(index);
+            _states![index] = new Fsm<TState, TContext>.State(state, handler);
+
+            if (!_hasInitialState)
+            {
+                _initialState = state;
+                _hasInitialState = true;
+            }
+
             return this;
         }
-        
+
         public FsmBuilder<TState, TContext> Without(TState state)
         {
+            if (_states == null) return this;
+
             var index = GetStateIndex(state);
-            _states[index] = default;
-            _removedStates ??= new System.Collections.Generic.HashSet<int>();
-            _removedStates.Add(index);
+            if (index < _stateCount)
+                _states[index] = default;
+
+            return this;
+        }
+
+        public FsmBuilder<TState, TContext> StartWith(TState state)
+        {
+            _initialState = state;
+            _hasInitialState = true;
             return this;
         }
 
@@ -161,40 +80,59 @@ namespace Refactor.Fsm
             _context = context;
             return this;
         }
-        
-        public FsmBuilder<TState, TContext> WithInitialState(TState state)
-        {
-            _initialState = state;
-            return this;
-        }
-
-        public FsmBuilder<TState, TContext> WithStack(int capacity = 8)
-        {
-            _stackCapacity = capacity;
-            return this;
-        }
-
-        public FsmBuilder<TState, TContext> WithoutStack()
-        {
-            _stackCapacity = null;
-            return this;
-        }
 
         public Fsm<TState, TContext> Build()
         {
-            var index = GetStateIndex(_initialState);
-            if (index < 0 || index >= _states.Length || _states[index].Handler == null)
-            {
-                if (_removedStates != null && _removedStates.Contains(index))
-                    throw new InvalidOperationException($"Initial state {_initialState} is not registered. It was removed via .Without().");
+            if (_states == null)
+                throw new InvalidOperationException("No states registered.");
 
-                 throw new InvalidOperationException($"Initial state {_initialState} is not registered.");
-            }
+            if (_context == null)
+                throw new InvalidOperationException("Context not set.");
 
-            return new Fsm<TState, TContext>(_states, _initialState, _context, _stackCapacity);
+            var initialIndex = GetStateIndex(_initialState);
+            if (initialIndex < 0 || initialIndex >= _stateCount)
+                throw new InvalidOperationException($"Initial state {_initialState} index out of range.");
+            if (!_states[initialIndex].HasAnyHandler)
+                throw new InvalidOperationException($"Initial state {_initialState} has no handlers.");
+
+            var resultStates = new Fsm<TState, TContext>.State[_stateCount];
+            Array.Copy(_states, resultStates, _stateCount);
+            _pool.Return(_states, clearArray: true);
+            _states = null;
+            return new Fsm<TState, TContext>(resultStates, _initialState, _context);
+        }
+
+        #region Private
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EnsureCapacity()
+        {
+            if (_states != null) return;
+
+            _stateCount = GetMaxEnumValue() + 1;
+            _states = _pool.Rent(_stateCount);
+            Array.Clear(_states, 0, _states.Length);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private int GetStateIndex(TState state) => UnsafeUtility.As<TState, int>(ref state);
+        private static int GetStateIndex(TState state) => Fsm<TState, TContext>.GetStateIndex(state);
+
+        private static int GetMaxEnumValue()
+        {
+            var values = Enum.GetValues(typeof(TState));
+            var max = 0;
+
+            for (var i = 0; i < values.Length; i++)
+            {
+                var value = (TState)values.GetValue(i)!;
+                var intValue = GetStateIndex(value);
+                if (intValue > max)
+                    max = intValue;
+            }
+
+            return max;
+        }
+
+        #endregion
     }
 }
